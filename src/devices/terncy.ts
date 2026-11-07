@@ -798,6 +798,22 @@ export const definitions: DefinitionWithExtend[] = [
         ],
     },
     {
+        // Review profile: confirm the fingerprint and DIM003-derived color temperature range on DIM004 hardware before submission.
+        fingerprint: [{modelID: "DIM004", manufacturerName: "Xiaoyan"}],
+        model: "DIM004",
+        vendor: "TERNCY",
+        description: "24W Jingwei color temperature dimmer",
+        // DIM003's proprietary current/calibration controls are intentionally not inherited without DIM004-specific verification.
+        extend: [
+            m.light({
+                colorTemp: {range: [142, 625], startup: false},
+                configureReporting: true,
+                effect: false,
+                powerOnBehavior: false,
+            }),
+        ],
+    },
+    {
         zigbeeModel: ["TERNCY-DC01"],
         model: "TERNCY-DC01",
         vendor: "TERNCY",
