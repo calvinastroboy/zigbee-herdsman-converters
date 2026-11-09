@@ -207,6 +207,40 @@ async function sendDim003ColorTempRange(
     );
 }
 
+// Keep DIM003's existing behavior unchanged while strictly validating the new profile.
+function strictDim004Numeric(converter: Tz.Converter): Tz.Converter {
+    return {
+        ...converter,
+        convertSet: async (entity, key, value, meta) => {
+            if (typeof value !== "number" || !Number.isInteger(value)) {
+                throw new Error(`${key} must be an integer number`);
+            }
+            if (key.startsWith("color_temperature_range_")) {
+                const minKey = "color_temperature_range_min_kelvin";
+                const maxKey = "color_temperature_range_max_kelvin";
+                const min = key === minKey ? value : meta.state?.[minKey] === undefined ? DIM003_DEFAULT_MIN_KELVIN : meta.state[minKey];
+                const max = key === maxKey ? value : meta.state?.[maxKey] === undefined ? DIM003_DEFAULT_MAX_KELVIN : meta.state[maxKey];
+                if (
+                    typeof min !== "number" ||
+                    typeof max !== "number" ||
+                    !Number.isInteger(min) ||
+                    !Number.isInteger(max) ||
+                    min < 1000 ||
+                    min > 10000 ||
+                    max < 1000 ||
+                    max > 10000
+                ) {
+                    throw new Error("Color temperature limits must be integer numbers from 1000 to 10000 K");
+                }
+                if (min >= max || kelvinToMired(max) >= kelvinToMired(min)) {
+                    throw new Error("Color temperature limits must remain distinct and ordered after conversion to mired");
+                }
+            }
+            return await converter.convertSet(entity, key, value, meta);
+        },
+    };
+}
+
 const terncyExtend = {
     addClusterAduroSmart: () =>
         m.deviceAddCustomCluster("manuSpecificClusterAduroSmart", {
@@ -542,6 +576,22 @@ const tzLocal = {
             return {state: {[key]: current}};
         },
     } satisfies Tz.Converter,
+    dim004_rated_max_current: {
+        key: ["rated_max_current_ma"],
+        convertSet: async (entity, key, value, meta) => {
+            // Official app SetMaxCurrentPage range, not a wattage-ratio calculation.
+            // The connected LED load may require a lower limit than the driver's maximum.
+            if (typeof value !== "number" || !Number.isInteger(value) || value < 100 || value > 1000 || value % 10 !== 0) {
+                throw new Error(`${key} must be 100–1000 mA in 10 mA steps and match the LED load rating`);
+            }
+            await sendDim003PowerCommand(entity, {
+                mode: DIM003_POWER_CALIBRATION_MODE_RATED_MAX_CURRENT,
+                current: value,
+                reserved: 0,
+            });
+            return {state: {[key]: value}};
+        },
+    } satisfies Tz.Converter,
     dim003_startup_depth_calibration: {
         key: ["startup_depth_calibration"],
         convertSet: async (entity, key, value, meta) => {
@@ -803,8 +853,61 @@ export const definitions: DefinitionWithExtend[] = [
         model: "DIM004",
         vendor: "TERNCY",
         description: "24W Jingwei color temperature dimmer",
-        // DIM003's proprietary current/calibration controls are intentionally not inherited without DIM004-specific verification.
+        // Experimental DIM003-compatible controls; hardware validation is still required.
+        // Never scale current by 24/100: output voltage and DIM004 driver limits are unknown.
+        // Current uses the official app range; configure sends no proprietary commands.
+        fromZigbee: [fzLocal.dim003_light_effect_attributes],
+        toZigbee: [
+            tzLocal.dim004_rated_max_current,
+            strictDim004Numeric(tzLocal.dim003_startup_depth_calibration),
+            strictDim004Numeric(tzLocal.dim003_color_temperature_range),
+            tzLocal.dim003_color_temperature_io_reversed,
+            tzLocal.dim003_light_up_curve,
+        ],
+        exposes: [
+            e
+                .numeric("rated_max_current_ma", ea.STATE_SET)
+                .withUnit("mA")
+                .withDescription("Maximum current limit from the DIM004 app range; must match the LED load rating, not just its power")
+                .withValueMin(100)
+                .withValueMax(1000)
+                .withValueStep(10)
+                .withCategory("config"),
+            e
+                .numeric("startup_depth_calibration", ea.STATE_SET)
+                .withDescription("Xiaoyan startup depth calibration")
+                .withValueMin(0)
+                .withValueMax(5000)
+                .withValueStep(1)
+                .withCategory("config"),
+            e
+                .numeric("color_temperature_range_min_kelvin", ea.STATE_SET)
+                .withUnit("K")
+                .withDescription("Warmest color temperature limit")
+                .withValueMin(1000)
+                .withValueMax(10000)
+                .withValueStep(1)
+                .withCategory("config"),
+            e
+                .numeric("color_temperature_range_max_kelvin", ea.STATE_SET)
+                .withUnit("K")
+                .withDescription("Coolest color temperature limit")
+                .withValueMin(1000)
+                .withValueMax(10000)
+                .withValueStep(1)
+                .withCategory("config"),
+            e
+                .binary("color_temperature_io_reversed", ea.STATE_SET, true, false)
+                .withDescription("Reverse the cool and warm white output IO mapping")
+                .withCategory("config"),
+            exposes
+                .enum("light_up_curve", ea.STATE_SET, Object.keys(DIM003_LIGHT_UP_CURVE))
+                .withDescription("Light-up curve; requires DIM004 firmware version 208 or newer")
+                .withCategory("config"),
+        ],
         extend: [
+            terncyExtend.addDimmerPowerCluster(),
+            terncyExtend.addDimmerLightEffectCluster(),
             m.light({
                 colorTemp: {range: [142, 625], startup: false},
                 configureReporting: true,
